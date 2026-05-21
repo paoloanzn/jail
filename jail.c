@@ -26,35 +26,65 @@ static void mkdir_p(const char *path) {
     if(system(cmd) != 0) die("mkdir_p");
 }
 
+static int cmd_bootstrap(int argc, char **argv);
+static int cmd_run(int argc, char **argv);
+static int cmd_install(int argc, char **argv);
+
 int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, 
+            "usage: %s bootstrap <rootfs>\n"
+            "       %s run <rootfs> <binpath> [args...]\n"
+            "       %s install <rootfs> <host-path> <rootfs-path>\n",
+            argv[0], argv[0], argv[0]);
+        return 2;
+    }
+
+    if (strcmp(argv[1], "bootstrap") == 0) {
+        return cmd_bootstrap(argc - 1, argv + 1);
+    }
+    if (strcmp(argv[1], "run") == 0) {
+        return cmd_run(argc - 1, argv + 1);
+    }
+    if (strcmp(argv[1], "install") == 0) {
+        return cmd_install(argc - 1, argv + 1);
+    }
+    fprintf(stderr, "%s: unknow subcommand %s\n", argv[0], argv[1]);
+    return 2;
+}
+
+static int cmd_bootstrap(int argc, char **argv) {
     if (argc != 3) {
-        fprintf(stderr, "usage: %s <rootfs> <binary>\n", argv[0]);
+        fprintf(stderr, "usage: %s bootstrap <rootfs>\n", argv[0]);
         return 2;
     }
 
     const char *rootfs = argv[1];
-    const char *binpath = argv[2];
 
     /* build minimal rootfs folder structure */
     char buf[4096];
-    snprintf(buf, sizeof buf, "%s/usr/lib", rootfs);
-    mkdir_p(buf);
-
-    snprintf(buf, sizeof buf, "%s/bin", rootfs);
-    mkdir_p(buf);
-
-    snprintf(buf, sizeof buf, "%s%s", rootfs, CACHE_DIR);
-    mkdir_p(buf);
-
-    snprintf(buf, sizeof buf, "%s%s", rootfs, DYLD_PATH);
-    copyfile(DYLD_PATH, buf);
+    snprintf(buf, sizeof buf, "%s/usr/lib", rootfs); mkdir_p(buf);
+    snprintf(buf, sizeof buf, "%s/bin", rootfs); mkdir_p(buf);
+    snprintf(buf, sizeof buf, "%s%s", rootfs, CACHE_DIR); mkdir_p(buf);
+    snprintf(buf, sizeof buf, "%s%s", rootfs, DYLD_PATH); copyfile(DYLD_PATH, buf);
 
     /* copy shared cache -> all shared libs are here */
     snprintf(buf, sizeof buf, "cp -f %s/dyld_shared_cache_arm64e* %s%s", CACHE_DIR, rootfs, CACHE_DIR);
     if (system(buf) != 0) die("copy cache");
 
-    snprintf(buf, sizeof buf, "%s/bin/hello", rootfs);
-    copyfile(binpath, buf);
+    return 0;
+}
+
+static int cmd_run(int argc, char **argv) {
+    if (argc != 3) {
+        fprintf(stderr, "usage: %s run <rootfs> <binary_path> [args...]\n", argv[0]);
+        return 2;
+    }
+
+    char buf[4096];
+
+    const char *rootfs = argv[1];
+    const char *binpath = argv[2];
 
     /* fork, chroot in the child, exec binary */
     pid_t pid = fork();
@@ -64,7 +94,6 @@ int main(int argc, char **argv) {
         if (chdir(rootfs) < 0) die("chdir");
         if (chroot(".") < 0) die("chroot");
         if (chdir("/") < 0) die("chdir post-chroot");
-        char *cargv[] = { "/bin/hello", NULL };
         
         /*
          * dyld inside the chroot:
@@ -92,11 +121,44 @@ int main(int argc, char **argv) {
         snprintf(buf, sizeof buf, "DYLD_SHARED_CACHE_DIR=%s", CACHE_DIR);
         char *cenvp[] = { buf, "DYLD_SHARED_REGION=private", NULL };
 
-        execve("/bin/hello", cargv, cenvp);
+        execve(binpath, argv + 2, cenvp);
         die("execve");
     }
 
     int status;
     if (waitpid(pid, &status, 0) < 0) die("waitpid");
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+static int cmd_install(int argc, char **argv) {
+    if (argc != 4) {
+        fprintf(stderr, "usage: %s install <rootfs> <host-path> <rootfs-path>\n", argv[0]);
+        return 2;
+    }
+
+    const char *rootfs = argv[1];
+    const char *host = argv[2];
+    const char *inside = argv[3];
+
+    char dst[4096]; char parent[4096];
+    snprintf(dst, sizeof dst, "%s%s", rootfs, inside);
+
+    /* check if parent exists */
+    strncpy(parent, dst, sizeof parent - 1);
+    parent[sizeof parent - 1] = 0;
+
+    /* return ptr to the last occurrence of '/' in parent */
+    /* parent = '/foo/bar/file.txt' -> ptr to '/' of '/file.txt'
+     */
+    char *slash = strrchr(parent, '/');
+    if (slash) {
+        /* parent = '/foo/bar/file.txt'  -> parent = '/foo/bar' */
+        *slash = 0;
+        mkdir_p(parent);
+    }
+
+    copyfile(host, dst);
+    /* set execution flag */
+    if (chmod(dst, 0755) < 0) die("chmod");
+    return 0;
 }
