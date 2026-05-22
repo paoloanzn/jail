@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #define DYLD_PATH "/usr/lib/dyld"
 #define CACHE_DIR "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld"
@@ -24,6 +25,10 @@ static void mkdir_p(const char *path) {
     char cmd[4096];
     snprintf(cmd, sizeof cmd, "mkdir -p '%s'", path);
     if(system(cmd) != 0) die("mkdir_p");
+}
+
+static void close_fds_from(int start_fd) {
+    for (int fd = start_fd; fd < 1024; fd++) close(fd);
 }
 
 static int cmd_bootstrap(int argc, char **argv);
@@ -81,16 +86,29 @@ static int cmd_run(int argc, char **argv) {
         return 2;
     }
 
+    /* NOTE: this is used also in the child process, might creat leak risks */
     char buf[4096];
 
     const char *rootfs = argv[1];
     const char *binpath = argv[2];
+
+    int out_pipe[2];
+    if (pipe(out_pipe) < 0) die("pipe");
 
     /* fork, chroot in the child, exec binary */
     pid_t pid = fork();
     if (pid < 0) die("fork");
 
     if (pid == 0) {
+        /* redirect stdout and stderr to pipe write end */
+        if (dup2(out_pipe[1], 1) < 0) die("dup2 stdout");
+        if (dup2(out_pipe[1], 2) < 0) die("dup2 stderr");
+        /* close original parent's fd to pipe ends*/
+        close(out_pipe[0]); close(out_pipe[1]);
+
+        /* close all other inherithed fds */
+        close_fds_from(3);
+
         if (chdir(rootfs) < 0) die("chdir");
         if (chroot(".") < 0) die("chroot");
         if (chdir("/") < 0) die("chdir post-chroot");
@@ -124,6 +142,14 @@ static int cmd_run(int argc, char **argv) {
         execve(binpath, argv + 2, cenvp);
         die("execve");
     }
+
+    close(out_pipe[1]);
+    /* read child stdout and stderr from pipe */
+    ssize_t n;
+    while ((n = read(out_pipe[0], buf, sizeof buf)) > 0) {
+        write(1, buf, n);
+    }
+    close(out_pipe[0]);
 
     int status;
     if (waitpid(pid, &status, 0) < 0) die("waitpid");
