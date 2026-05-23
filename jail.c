@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <util.h>
+#include <termios.h>
 
 #define DYLD_PATH "/usr/lib/dyld"
 #define CACHE_DIR "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld"
@@ -648,6 +649,31 @@ static int cmd_install(int argc, char **argv) {
     return 0;
 }
 
+static struct termios saved_tios;
+static int saved_tios_valid = 0;
+
+static void enter_raw_mode(void) {
+    if (!isatty(0)) return;
+    /*
+     * save current termios configuration for late restoring.
+     * never exit the program leaving the user's terminal in raw mode.
+     */
+    if (tcgetattr(0, &saved_tios) < 0) die("tcgetattr");
+
+    saved_tios_valid = 1;
+    struct termios raw = saved_tios;
+    cfmakeraw(&raw);
+
+    if (tcsetattr(0, TCSANOW, &raw) < 0) die("tcsetattr raw");
+}
+
+static void leave_raw_mode(void) {
+    /* restore original termios configuration */
+    if (saved_tios_valid) {
+        tcsetattr(0, TCSANOW, &saved_tios);
+    }
+}
+
 static int cmd_shell(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: shell <rootfs> <shellbin-path>\n");
@@ -659,7 +685,6 @@ static int cmd_shell(int argc, char **argv) {
 
     int master;
     pid_t pid = forkpty(&master, NULL, NULL, NULL);
-
     if (pid < 0) die("forkpty");
 
     if (pid == 0) {
@@ -671,6 +696,9 @@ static int cmd_shell(int argc, char **argv) {
         execve(shellbin, argv+2, cenvp);
         die("execve");
     }
+
+    /* put parent terminal in raw mode so keystrokes flow to the pty unmodified */
+    enter_raw_mode();
 
     /* file descriptors set */
     fd_set rfds; 
@@ -709,6 +737,7 @@ static int cmd_shell(int argc, char **argv) {
         }
     }
     int status; waitpid(pid, &status, 0) ;
+    leave_raw_mode();
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
