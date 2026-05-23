@@ -8,9 +8,13 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <util.h>
 
 #define DYLD_PATH "/usr/lib/dyld"
 #define CACHE_DIR "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld"
+
+#define DYLD_SHARED_CACHE_DIR_ENV "DYLD_SHARED_CACHE_DIR=" CACHE_DIR
+#define DYLD_SHARED_REGION_ENV "DYLD_SHARED_REGION=private"
 
 /* arm64e patching */
 #define MH_MAGIC_64                  0xfeedfacf
@@ -474,6 +478,7 @@ static void close_fds_from(int start_fd) {
 static int cmd_bootstrap(int argc, char **argv);
 static int cmd_run(int argc, char **argv);
 static int cmd_install(int argc, char **argv);
+static int cmd_shell(const char *rootfs, char **child_argv);
 
 int main(int argc, char **argv) {
     if (argc < 2) {
@@ -526,7 +531,6 @@ static int cmd_run(int argc, char **argv) {
         return 2;
     }
 
-    /* NOTE: this is used also in the child process, might creat leak risks */
     char buf[4096];
 
     const char *rootfs = argv[1];
@@ -576,8 +580,7 @@ static int cmd_run(int argc, char **argv) {
          *     -> avoid the global shared-region path
          *     -> privately mmap this process's copy of the cache instead
          */
-        snprintf(buf, sizeof buf, "DYLD_SHARED_CACHE_DIR=%s", CACHE_DIR);
-        char *cenvp[] = { buf, "DYLD_SHARED_REGION=private", NULL };
+        char *cenvp[] = { DYLD_SHARED_CACHE_DIR_ENV, DYLD_SHARED_REGION_ENV, NULL };
 
         execve(binpath, argv + 2, cenvp);
         die("execve");
@@ -638,5 +641,20 @@ static int cmd_install(int argc, char **argv) {
 
     /* set execution flag */
     if (chmod(dst, 0755) < 0) die("chmod");
+    return 0;
+}
+
+static int cmd_shell(const char *rootfs, char **child_argv) {
+    int master;
+    pid_t pid = forkpty(&master, NULL, NULL, NULL);
+
+    if (pid < 0) die("forkpty");
+
+    if (pid == 0) {
+        if (chdir(rootfs) < 0)  die("chdir");
+        if (chroot(".") < 0)    die("chroot");
+        if (chdir("/") < 0)     die("chdir post-chroot");    
+    }
+
     return 0;
 }
