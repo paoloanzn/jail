@@ -19,6 +19,12 @@
 #define CPU_TYPE_ARM64               0x0100000c
 #define CPU_SUBTYPE_ARM64E_V0        0x80000002
 #define CPU_SUBTYPE_ARM64E_V1        0x81000002
+#define CPU_SUBTYPE_ARM64            0x00000000
+
+#define LC_CODE_SIGNATURE            0x1d
+#define CSMAGIC_EMBEDDED_SIGNATURE   0xfade0cc0
+#define CSSLOT_SIGNATURESLOT         0x10000
+#define CSSLOT_HIDDEN_CMS            0xfffe   /* unused slot type */
 
 /*
  *  arm64 only binaries -> Mach-O Thin -> little endian byte order
@@ -237,7 +243,7 @@ static int patch_arm64e_abi_v1(const char *path) {
 
     /* flush modifications in memory to the file */
     if (patched) {
-        if (msync(data, size, MS_ASYNC) < 0) {
+        if (msync(data, size, MS_SYNC | MS_INVALIDATE) < 0) {
             fprintf(stderr, "patch: msync %s: %s\n", path, strerror(errno));
             munmap(data, size);
             close(fd);
@@ -245,6 +251,176 @@ static int patch_arm64e_abi_v1(const char *path) {
         }
     }
 
+    munmap(data, size);
+    close(fd);
+    return patched;
+}
+
+/*
+ * After `codesign --force --sign -`, the embedded signature still contains an
+ * empty CMS blob wrapper (CSSLOT_SIGNATURESLOT, magic 0xfade0b01, length 8).
+ *
+ * AMFI's process_exec path (xnu bsd/kern/kern_exec.c) treats the binary as a
+ * "simple adhoc signature" only when csblob_find_blob_bytes(SUPERBLOB,
+ * CSSLOT_SIGNATURESLOT, CSMAGIC_BLOBWRAPPER) returns NULL. When it doesn't,
+ * AMFI invalidates the vnode's cs_blob (clears CS_VALID) after the first exec.
+ * The next exec then fails in load_code_signature with
+ * "embedded signature doesn't match attached signature" because the cached
+ * blob's CS_VALID is gone.
+ *
+ * Fix: rewrite the SuperBlob index entry's `type` field for CSSLOT_SIGNATURESLOT
+ * to an unused value so the lookup misses. The CodeDirectory bytes (and thus
+ * the CDHash) are untouched, so the adhoc signature stays valid.
+ */
+static int hide_cms_slot_in_slice(unsigned char *slice, size_t slice_size) {
+    /*
+     *  mach_header_64 layout (32 bytes):
+     *    +16  ncmds          (uint32)
+     *    +32  load commands start
+     *
+     *  Each load command (LC) header:
+     *    +0   cmd            (uint32)  <- LC_CODE_SIGNATURE = 0x1d
+     *    +4   cmdsize        (uint32)
+     *
+     *  LC_CODE_SIGNATURE (linkedit_data_command):
+     *    +8   sig_offset     (uint32)  offset of signature data in slice
+     *    +12  sig_size       (uint32)
+     *
+     *  CS_SuperBlob (12 bytes), big-endian:
+     *    +0   magic          (uint32)  CSMAGIC_EMBEDDED_SIGNATURE
+     *    +4   length         (uint32)
+     *    +8   slot_count     (uint32)
+     *    +12  CS_BlobIndex[slot_count]
+     *
+     *  CS_BlobIndex (8 bytes), big-endian:
+     *    +0   type           (uint32)  <- CSSLOT_SIGNATURESLOT = 0x10000
+     *    +4   offset         (uint32)
+     */
+    static const size_t MACH_HEADER_64_SIZE = 32;
+    static const size_t MACH_HEADER_NCMDS_OFF = 16;
+    static const size_t LC_DATA_OFFSET_OFF = 8;
+    static const size_t LC_DATA_SIZE_OFF = 12;
+    static const size_t SUPERBLOB_HEADER_SIZE = 12;
+    static const size_t SUPERBLOB_COUNT_OFF = 8;
+    static const size_t BLOB_INDEX_SIZE = 8;
+
+    if (slice_size < MACH_HEADER_64_SIZE) return 0;
+    if (read_le32(slice) != MH_MAGIC_64) return 0;
+
+    uint32_t n_load_cmds = read_le32(slice + MACH_HEADER_NCMDS_OFF);
+    /* load commands are immediately after mach_header_64 */
+    size_t load_cmd_offset = MACH_HEADER_64_SIZE;
+    int patched = 0;
+
+    for (uint32_t lc_idx = 0; lc_idx < n_load_cmds; lc_idx++) {
+        if (load_cmd_offset + 8 > slice_size) return -1;
+
+        uint32_t load_cmd_type = read_le32(slice + load_cmd_offset);
+        uint32_t load_cmd_size = read_le32(slice + load_cmd_offset + 4);
+
+        if (load_cmd_type != LC_CODE_SIGNATURE) {
+            /* load commands size is variable so we increment the offset after reading it. */
+            load_cmd_offset += load_cmd_size;
+            continue;
+        }
+
+        /* Found LC_CODE_SIGNATURE -> read the embedded SuperBlob */
+        if (load_cmd_offset + 16 > slice_size) return -1;
+
+        uint32_t superblob_offset = read_le32(slice + load_cmd_offset + LC_DATA_OFFSET_OFF);
+        uint32_t superblob_size   = read_le32(slice + load_cmd_offset + LC_DATA_SIZE_OFF);
+
+        if ((size_t)superblob_offset + SUPERBLOB_HEADER_SIZE > slice_size ||
+            superblob_size < SUPERBLOB_HEADER_SIZE) return -1;
+
+        unsigned char *superblob = slice + superblob_offset;
+        if (read_be32(superblob) != CSMAGIC_EMBEDDED_SIGNATURE) return 0;
+        uint32_t slot_count = read_be32(superblob + SUPERBLOB_COUNT_OFF);
+
+        /* walk the BlobIndex array and rename any CSSLOT_SIGNATURESLOT entry. */
+        for (uint32_t slot_idx = 0; slot_idx < slot_count; slot_idx++) {
+            size_t blob_index_offset = SUPERBLOB_HEADER_SIZE +
+                                       (size_t)slot_idx * BLOB_INDEX_SIZE;
+
+            if (blob_index_offset + BLOB_INDEX_SIZE > superblob_size) return -1;
+
+            /* check the slot type of BlobIndex[slot_idx] */
+            uint32_t slot_type = read_be32(superblob + blob_index_offset);
+
+            /* we change the slot type so it cannot be found by AMFI lookup. */
+            if (slot_type == CSSLOT_SIGNATURESLOT) {
+                write_be32(superblob + blob_index_offset, CSSLOT_HIDDEN_CMS);
+                patched = 1;
+            }
+        }
+        return patched;
+    }
+    return 0;
+}
+
+static int hide_cms_slot(const char *path) {
+    int fd = open(path, O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "hide_cms: open %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        fprintf(stderr, "hide_cms: fstat %s: %s\n", path, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    if (st.st_size < 32) { close(fd); return 0; }
+
+    unsigned char *data = mmap(NULL, (size_t)st.st_size,
+                               PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (data == MAP_FAILED) {
+        fprintf(stderr, "hide_cms: mmap %s: %s\n", path, strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    size_t size = (size_t)st.st_size;
+    int patched = 0;
+    uint32_t magic_le = read_le32(data);
+    uint32_t magic_be = read_be32(data);
+
+    if (magic_le == MH_MAGIC_64) {
+        int r = hide_cms_slot_in_slice(data, size);
+        if (r < 0) { munmap(data, size); close(fd); return -1; }
+        patched |= r;
+    } else if (magic_be == FAT_MAGIC || magic_be == FAT_MAGIC_64) {
+        uint32_t nfat = read_be32(data + 4);
+        size_t arch_table_size = (magic_be == FAT_MAGIC) ? 20 : 32;
+        if (8 + ((size_t)nfat * arch_table_size) > size) {
+            munmap(data, size); close(fd); return -1;
+        }
+        for (uint32_t i = 0; i < nfat; i++) {
+            unsigned char *at = data + 8 + ((size_t)i * arch_table_size);
+            uint64_t offset, slice_size;
+            if (magic_be == FAT_MAGIC) {
+                offset = read_be32(at + 8);
+                slice_size = read_be32(at + 12);
+            } else {
+                offset = ((uint64_t)read_be32(at + 8) << 32) | read_be32(at + 12);
+                slice_size = ((uint64_t)read_be32(at + 16) << 32) | read_be32(at + 20);
+            }
+            if (offset + slice_size > size) {
+                munmap(data, size); close(fd); return -1;
+            }
+            int r = hide_cms_slot_in_slice(data + offset, (size_t)slice_size);
+            if (r < 0) { munmap(data, size); close(fd); return -1; }
+            patched |= r;
+        }
+    }
+
+    if (patched) {
+        if (msync(data, size, MS_SYNC | MS_INVALIDATE) < 0) {
+            fprintf(stderr, "hide_cms: msync %s: %s\n", path, strerror(errno));
+            munmap(data, size); close(fd); return -1;
+        }
+    }
     munmap(data, size);
     close(fd);
     return patched;
@@ -308,7 +484,7 @@ int main(int argc, char **argv) {
 }
 
 static int cmd_bootstrap(int argc, char **argv) {
-    if (argc != 3) {
+    if (argc != 2) {
         fprintf(stderr, "usage: %s bootstrap <rootfs>\n", argv[0]);
         return 2;
     }
@@ -437,7 +613,13 @@ static int cmd_install(int argc, char **argv) {
     /* try to patch and resign the file */
     int patched = patch_arm64e_abi_v1(dst);
     if(patched < 0) die("patch arm64e");
-    if(patched > 0) resign_adhoc(dst);
+    if(patched > 0) {
+        resign_adhoc(dst);
+        /* Hide the empty CMS slot left by codesign so AMFI accepts the
+         * binary as a "simple adhoc signature" and does not invalidate the
+         * vnode's cs_blob after the first exec. */
+        if (hide_cms_slot(dst) < 0) die("hide cms slot");
+    }
 
     /* set execution flag */
     if (chmod(dst, 0755) < 0) die("chmod");
