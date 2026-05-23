@@ -478,15 +478,16 @@ static void close_fds_from(int start_fd) {
 static int cmd_bootstrap(int argc, char **argv);
 static int cmd_run(int argc, char **argv);
 static int cmd_install(int argc, char **argv);
-static int cmd_shell(const char *rootfs, char **child_argv);
+static int cmd_shell(int argc, char **argv);
 
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, 
             "usage: %s bootstrap <rootfs>\n"
             "       %s run <rootfs> <binpath> [args...]\n"
-            "       %s install <rootfs> <host-path> <rootfs-path>\n",
-            argv[0], argv[0], argv[0]);
+            "       %s install <rootfs> <host-path> <rootfs-path>\n"
+            "       %s shell <rootfs> <shellbin-path> [args...]\n",
+            argv[0], argv[0], argv[0], argv[0]);
         return 2;
     }
 
@@ -495,6 +496,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "run") == 0) {
         return cmd_run(argc - 1, argv + 1);
+    }
+    if (strcmp(argv[1], "shell") == 0) {
+        return cmd_shell(argc - 1, argv + 1);
     }
     if (strcmp(argv[1], "install") == 0) {
         return cmd_install(argc - 1, argv + 1);
@@ -505,7 +509,7 @@ int main(int argc, char **argv) {
 
 static int cmd_bootstrap(int argc, char **argv) {
     if (argc != 2) {
-        fprintf(stderr, "usage: %s bootstrap <rootfs>\n", argv[0]);
+        fprintf(stderr, "usage: bootstrap <rootfs>\n");
         return 2;
     }
 
@@ -527,7 +531,7 @@ static int cmd_bootstrap(int argc, char **argv) {
 
 static int cmd_run(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s run <rootfs> <binary_path> [args...]\n", argv[0]);
+        fprintf(stderr, "usage: run <rootfs> <binary_path> [args...]\n");
         return 2;
     }
 
@@ -601,7 +605,7 @@ static int cmd_run(int argc, char **argv) {
 
 static int cmd_install(int argc, char **argv) {
     if (argc != 4) {
-        fprintf(stderr, "usage: %s install <rootfs> <host-path> <rootfs-path>\n", argv[0]);
+        fprintf(stderr, "usage: install <rootfs> <host-path> <rootfs-path>\n");
         return 2;
     }
 
@@ -644,7 +648,15 @@ static int cmd_install(int argc, char **argv) {
     return 0;
 }
 
-static int cmd_shell(const char *rootfs, char **child_argv) {
+static int cmd_shell(int argc, char **argv) {
+    if (argc != 3) {
+        fprintf(stderr, "usage: shell <rootfs> <shellbin-path>\n");
+        return 2;
+    }
+
+    const char *rootfs = argv[1];
+    const char *shellbin = argv[2];
+
     int master;
     pid_t pid = forkpty(&master, NULL, NULL, NULL);
 
@@ -653,8 +665,50 @@ static int cmd_shell(const char *rootfs, char **child_argv) {
     if (pid == 0) {
         if (chdir(rootfs) < 0)  die("chdir");
         if (chroot(".") < 0)    die("chroot");
-        if (chdir("/") < 0)     die("chdir post-chroot");    
+        if (chdir("/") < 0)     die("chdir post-chroot");
+
+        char *cenvp[] = { DYLD_SHARED_CACHE_DIR_ENV, DYLD_SHARED_REGION_ENV, NULL };
+        execve(shellbin, argv+2, cenvp);
+        die("execve");
     }
 
-    return 0;
+    /* file descriptors set */
+    fd_set rfds; 
+
+    char buf[4096];
+
+    /*
+     * loop keeps forwarding bytes in both directions:
+     * pty master -> host stdout
+     * host stdin -> pty master
+     */
+    for(;;) {
+        /* clear the set */
+        FD_ZERO(&rfds);
+
+        /* 
+         * master -> readable when the shell wrote output to the pty
+         * 0 (stdin) -> readable when the user typed input into the runner
+         */
+        FD_SET(master, &rfds); FD_SET(0, &rfds);
+
+        int maxfd = master > 0 ? master : 0;
+        if (select(maxfd + 1, &rfds, NULL, NULL, NULL) < 0) {
+            if (errno == EINTR) continue; die("select");
+        }
+
+        if (FD_ISSET(master, &rfds)) {
+            ssize_t n = read(master, buf, sizeof buf);
+            if (n <= 0) break;
+            write (1, buf, n);
+        }
+        if ( FD_ISSET(0 ,&rfds)) {
+            ssize_t n = read(0, buf, sizeof buf);
+            if (n <= 0) break;
+            write (master, buf, n);
+        }
+    }
+    int status; waitpid(pid, &status, 0) ;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
+
