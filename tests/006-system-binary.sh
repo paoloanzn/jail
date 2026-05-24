@@ -9,14 +9,17 @@ expect_stdout "T8.2: /bin/ls survives three consecutive runs" \
     "$JAIL_CMD run $TEST_ROOTFS /bin/ls -1 /; printf 'rc=%s\n' \"\$?\"; $JAIL_CMD run $TEST_ROOTFS /bin/ls -1 /; printf 'rc=%s\n' \"\$?\"; $JAIL_CMD run $TEST_ROOTFS /bin/ls -1 /; printf 'rc=%s\n' \"\$?\"" <<'EOF'
 System
 bin
+tmp
 usr
 rc=0
 System
 bin
+tmp
 usr
 rc=0
 System
 bin
+tmp
 usr
 rc=0
 EOF
