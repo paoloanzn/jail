@@ -12,9 +12,19 @@ if [ ! -x "$TEST_ROOTFS/bin/bash" ]; then
     $JAIL_CMD install "$TEST_ROOTFS" /bin/bash /bin/bash || exit 1
 fi
 
+if [ ! -x "$TEST_ROOTFS/usr/bin/id" ]; then
+    $JAIL_CMD install "$TEST_ROOTFS" /usr/bin/id /usr/bin/id || exit 1
+fi
+
 expect_stdout "T6.1: run uses a pipe, not a tty" \
     "$JAIL_CMD install $TEST_ROOTFS $FIXTURE_DIR/ttycheck /bin/ttycheck && $JAIL_CMD run $TEST_ROOTFS /bin/ttycheck" <<'EOF'
 notty
+EOF
+
+expect_stdout "T6.2/T11.2: run and shell drop root before exec" \
+    "run_uid=\$($JAIL_CMD run $TEST_ROOTFS /usr/bin/id -u); run_rc=\$?; if [ \"\$run_rc\" -ne 0 ]; then printf 'run failed\n'; elif [ \"\$run_uid\" = 0 ]; then printf 'run root\n'; else printf 'run unprivileged\n'; fi; shell_uid=\$(printf '/usr/bin/id -u\nexit\n' | $JAIL_CMD shell $TEST_ROOTFS /bin/sh | tr -d '\r' | grep -E '^[0-9][0-9]*\$'); shell_rc=\$?; if [ \"\$shell_rc\" -ne 0 ]; then printf 'shell failed\n'; elif [ \"\$shell_uid\" = 0 ]; then printf 'shell root\n'; else printf 'shell unprivileged\n'; fi" <<'EOF'
+run unprivileged
+shell unprivileged
 EOF
 
 expect_stdout "T11.1: shell gives child a tty" \

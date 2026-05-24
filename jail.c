@@ -28,6 +28,7 @@
 #include <util.h>
 #include <termios.h>
 #include <signal.h>
+#include <grp.h>
 
 #define DYLD_PATH "/usr/lib/dyld"
 #define CACHE_DIR "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld"
@@ -491,6 +492,34 @@ static void close_fds_from(int start_fd) {
     for (int fd = start_fd; fd < 1024; fd++) close(fd);
 }
 
+static int parse_id_env(const char *name, unsigned long *id) {
+    const char *value = getenv(name);
+    char *end = NULL;
+
+    if (value == NULL || *value == 0) return 0;
+
+    errno = 0;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != 0) return 0;
+
+    *id = parsed;
+    return 1;
+}
+
+static void drop_privileges(void) {
+    uid_t uid = getuid();
+    gid_t gid = getgid();
+    unsigned long parsed;
+
+    /* sudo sets real uid/gid to root, so use its original-caller metadata. */
+    if (parse_id_env("SUDO_UID", &parsed)) uid = (uid_t)parsed;
+    if (parse_id_env("SUDO_GID", &parsed)) gid = (gid_t)parsed;
+
+    if (setgroups(1, &gid) < 0) die("setgroups");
+    if (setgid(gid) < 0) die("setgid");
+    if (setuid(uid) < 0) die("setuid");
+}
+
 static int cmd_run(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: run <rootfs> <binary_path> [args...]\n");
@@ -522,7 +551,9 @@ static int cmd_run(int argc, char **argv) {
         if (chdir(rootfs) < 0) die("chdir");
         if (chroot(".") < 0) die("chroot");
         if (chdir("/") < 0) die("chdir post-chroot");
-        
+
+        drop_privileges();
+
         /*
          * dyld inside the chroot:
          *   <binary> -> /usr/lib/dyld -> libSystem -> dyld shared cache
@@ -823,6 +854,8 @@ static int cmd_shell(int argc, char **argv) {
         if (chdir(rootfs) < 0)  die("chdir");
         if (chroot(".") < 0)    die("chroot");
         if (chdir("/") < 0)     die("chdir post-chroot");
+
+        drop_privileges();
 
         char *cenvp[] = { DYLD_SHARED_CACHE_DIR_ENV, DYLD_SHARED_REGION_ENV, NULL };
         execve(shellbin, argv+2, cenvp);
