@@ -491,28 +491,6 @@ static void close_fds_from(int start_fd) {
     for (int fd = start_fd; fd < 1024; fd++) close(fd);
 }
 
-static int cmd_bootstrap(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: bootstrap <rootfs>\n");
-        return 2;
-    }
-
-    const char *rootfs = argv[1];
-
-    /* build minimal rootfs folder structure */
-    char buf[4096];
-    snprintf(buf, sizeof buf, "%s/usr/lib", rootfs); mkdir_p(buf);
-    snprintf(buf, sizeof buf, "%s/bin", rootfs); mkdir_p(buf);
-    snprintf(buf, sizeof buf, "%s%s", rootfs, CACHE_DIR); mkdir_p(buf);
-    snprintf(buf, sizeof buf, "%s%s", rootfs, DYLD_PATH); copyfile(DYLD_PATH, buf);
-
-    /* copy shared cache -> all shared libs are here */
-    snprintf(buf, sizeof buf, "cp -f %s/dyld_shared_cache_arm64e* %s%s", CACHE_DIR, rootfs, CACHE_DIR);
-    if (system(buf) != 0) die("copy cache");
-
-    return 0;
-}
-
 static int cmd_run(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: run <rootfs> <binary_path> [args...]\n");
@@ -587,16 +565,47 @@ static int cmd_run(int argc, char **argv) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
-static int cmd_install(int argc, char **argv) {
-    if (argc != 4) {
-        fprintf(stderr, "usage: install <rootfs> <host-path> <rootfs-path>\n");
-        return 2;
-    }
+static const char *DEFAULT_TOOLS[] = {
+    "/bin/[",
+    "/bin/bash",
+    "/bin/cat",
+    "/bin/chmod",
+    "/bin/cp",
+    "/bin/csh",
+    "/bin/dash",
+    "/bin/date",
+    "/bin/dd",
+    "/bin/df",
+    "/bin/echo",
+    "/bin/ed",
+    "/bin/expr",
+    "/bin/hostname",
+    "/bin/kill",
+    "/bin/ksh",
+    "/bin/launchctl",
+    "/bin/link",
+    "/bin/ln",
+    "/bin/ls",
+    "/bin/mkdir",
+    "/bin/mv",
+    "/bin/pax",
+    "/bin/ps",
+    "/bin/pwd",
+    "/bin/realpath",
+    "/bin/rm",
+    "/bin/rmdir",
+    "/bin/sh",
+    "/bin/sleep",
+    "/bin/stty",
+    "/bin/sync",
+    "/bin/tcsh",
+    "/bin/test",
+    "/bin/unlink",
+    "/bin/wait4path",
+    "/bin/zsh"
+};
 
-    const char *rootfs = argv[1];
-    const char *host = argv[2];
-    const char *inside = argv[3];
-
+static void install_binary(const char *rootfs, const char *host, const char *inside) {
     char dst[4096]; char parent[4096];
     snprintf(dst, sizeof dst, "%s%s", rootfs, inside);
 
@@ -629,6 +638,43 @@ static int cmd_install(int argc, char **argv) {
 
     /* set execution flag */
     if (chmod(dst, 0755) < 0) die("chmod");
+}
+
+static int cmd_install(int argc, char **argv) {
+    if (argc != 4) {
+        fprintf(stderr, "usage: install <rootfs> <host-path> <rootfs-path>\n");
+        return 2;
+    }
+
+    install_binary(argv[1], argv[2], argv[3]);
+    return 0;
+}
+
+static int cmd_bootstrap(int argc, char **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: bootstrap <rootfs>\n");
+        return 2;
+    }
+
+    const char *rootfs = argv[1];
+
+    /* build minimal rootfs folder structure */
+    char buf[4096];
+    snprintf(buf, sizeof buf, "%s/usr/lib", rootfs); mkdir_p(buf);
+    snprintf(buf, sizeof buf, "%s/bin", rootfs); mkdir_p(buf);
+    snprintf(buf, sizeof buf, "%s%s", rootfs, CACHE_DIR); mkdir_p(buf);
+    snprintf(buf, sizeof buf, "%s%s", rootfs, DYLD_PATH); copyfile(DYLD_PATH, buf);
+
+    /* copy shared cache -> all shared libs are here */
+    snprintf(buf, sizeof buf, "cp -f %s/dyld_shared_cache_arm64e* %s%s", CACHE_DIR, rootfs, CACHE_DIR);
+    if (system(buf) != 0) die("copy cache");
+
+    /* install all binaries from DEFAULT_TOOLS */
+    for (size_t i = 0; i < sizeof DEFAULT_TOOLS / sizeof DEFAULT_TOOLS[0]; i++) {
+        /* mirror the same host path inside rootfs */
+        install_binary(rootfs, DEFAULT_TOOLS[i],
+                        DEFAULT_TOOLS[i]);
+    }
     return 0;
 }
 
