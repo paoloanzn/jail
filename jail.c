@@ -652,6 +652,64 @@ static void leave_raw_mode(void) {
     }
 }
 
+static void drain_to_stdout(int master) {
+    /* after child exit master still has buffered bytes */
+    int flags = fcntl(master, F_GETFL, 0);
+    fcntl(master, F_SETFL, flags | O_NONBLOCK);
+    char buf[4096]; ssize_t n;
+    while ((n = read(master, buf, sizeof buf)) > 0) {
+        write(1, buf, n);
+    }
+    fcntl(master, F_SETFL, flags);
+}
+
+static void relay(int master, pid_t child) {
+    /* file descriptors set */
+    fd_set rfds; char buf[4096];
+    /*
+     * loop keeps forwarding bytes in both directions:
+     * pty master -> host stdout
+     * host stdin -> pty master
+     */
+    for(;;) {
+        /* clear the set */
+        FD_ZERO(&rfds);
+
+        /* 
+         * master -> readable when the shell wrote output to the pty
+         * 0 (stdin) -> readable when the user typed input into the runner
+         */
+        FD_SET(master, &rfds); FD_SET(0, &rfds);
+
+        int maxfd = master > 0 ? master : 0;
+        if (select(maxfd + 1, &rfds, NULL, NULL, NULL) < 0) {
+            if (errno == EINTR) continue; die("select");
+        }
+
+        if (FD_ISSET(master, &rfds)) {
+            ssize_t n = read(master, buf, sizeof buf);
+            if (n <= 0) return; /* child closed pty */
+            write(1, buf, n);
+        }
+        if (FD_ISSET(0 ,&rfds)) {
+            ssize_t n = read(0, buf, sizeof buf);
+            /* user closed stdin -> send EOF to child */
+            if (n <= 0) {
+                close(master);
+                return;
+            }
+            write(master, buf, n);
+        }
+    }
+    /* when child dies drain master and exit */
+    int status;
+    pid_t r = waitpid(child, &status, WNOHANG);
+    if (r == child) {
+        drain_to_stdout(master);
+        return;
+    }
+}
+
 static int cmd_shell(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: shell <rootfs> <shellbin-path>\n");
@@ -677,45 +735,10 @@ static int cmd_shell(int argc, char **argv) {
 
     /* put parent terminal in raw mode so keystrokes flow to the pty unmodified */
     enter_raw_mode();
-
-    /* file descriptors set */
-    fd_set rfds; 
-
-    char buf[4096];
-
-    /*
-     * loop keeps forwarding bytes in both directions:
-     * pty master -> host stdout
-     * host stdin -> pty master
-     */
-    for(;;) {
-        /* clear the set */
-        FD_ZERO(&rfds);
-
-        /* 
-         * master -> readable when the shell wrote output to the pty
-         * 0 (stdin) -> readable when the user typed input into the runner
-         */
-        FD_SET(master, &rfds); FD_SET(0, &rfds);
-
-        int maxfd = master > 0 ? master : 0;
-        if (select(maxfd + 1, &rfds, NULL, NULL, NULL) < 0) {
-            if (errno == EINTR) continue; die("select");
-        }
-
-        if (FD_ISSET(master, &rfds)) {
-            ssize_t n = read(master, buf, sizeof buf);
-            if (n <= 0) break;
-            write (1, buf, n);
-        }
-        if ( FD_ISSET(0 ,&rfds)) {
-            ssize_t n = read(0, buf, sizeof buf);
-            if (n <= 0) break;
-            write (master, buf, n);
-        }
-    }
+    atexit(leave_raw_mode);
+    /* start master - replica pty relay loop */
+    relay(master, pid);
     int status; waitpid(pid, &status, 0) ;
-    leave_raw_mode();
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
