@@ -147,7 +147,8 @@ static const char *DEFAULT_TOOLS[] = {
     "/usr/bin/bzip2",
     "/usr/bin/bunzip2",
     "/usr/bin/zip",
-    "/usr/bin/unzip"
+    "/usr/bin/unzip",
+    "/usr/bin/curl"
 };
 
 static struct termios saved_tios;
