@@ -21,11 +21,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <util.h>
 #include <termios.h>
+#include <signal.h>
 
 #define DYLD_PATH "/usr/lib/dyld"
 #define CACHE_DIR "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld"
@@ -456,11 +458,14 @@ fail:
     return -1;
 }
 
+/* standard utilities */
+
 static void die(const char *what) {
     fprintf(stderr, "jail: %s: %s\n", what, strerror(errno));
     exit(1);
 }
 
+/* TODO (AGENT): replace with stdlib copyfile() -> #include <copyfile.h> */
 static void copyfile(const char *src, const char *dst) {
     char cmd[4096];
     snprintf(cmd, sizeof cmd, "cp -f '%s' '%s'", src, dst);
@@ -629,6 +634,7 @@ static int cmd_install(int argc, char **argv) {
 
 static struct termios saved_tios;
 static int saved_tios_valid = 0;
+static int g_master_fd = -1;
 
 static void enter_raw_mode(void) {
     if (!isatty(0)) return;
@@ -650,6 +656,27 @@ static void leave_raw_mode(void) {
     if (saved_tios_valid) {
         tcsetattr(0, TCSANOW, &saved_tios);
     }
+}
+
+static void on_winch(int signo) {
+    (void)signo;
+    if (g_master_fd < 0) return;
+
+    struct winsize ws;
+   
+    /* set window size as ws for fd g_master_fd */
+    if (ioctl(0, TIOCGWINSZ, &ws) == 0) {
+        ioctl(g_master_fd, TIOCSWINSZ, &ws);
+    }
+}
+
+static void install_winch(int master) {
+    g_master_fd = master;
+    struct sigaction sa = {0};
+    sa.sa_handler = on_winch;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    sigaction(SIGWINCH, &sa, NULL);
 }
 
 static void drain_to_stdout(int master) {
@@ -719,8 +746,11 @@ static int cmd_shell(int argc, char **argv) {
     const char *rootfs = argv[1];
     const char *shellbin = argv[2];
 
+    struct winsize ws;
+    int have_ws = (ioctl(0, TIOCGWINSZ, &ws) == 0);
+
     int master;
-    pid_t pid = forkpty(&master, NULL, NULL, NULL);
+    pid_t pid = forkpty(&master, NULL, NULL, have_ws ? &ws : NULL);
     if (pid < 0) die("forkpty");
 
     if (pid == 0) {
@@ -736,6 +766,7 @@ static int cmd_shell(int argc, char **argv) {
     /* put parent terminal in raw mode so keystrokes flow to the pty unmodified */
     enter_raw_mode();
     atexit(leave_raw_mode);
+    install_winch(master);
     /* start master - replica pty relay loop */
     relay(master);
     int status; waitpid(pid, &status, 0) ;
