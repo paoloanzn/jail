@@ -650,6 +650,23 @@ static int cmd_install(int argc, char **argv) {
     return 0;
 }
 
+/*
+ * The cp'd cache slices are new vnodes with com.apple.provenance and no
+ * trustcache entry, so the first exec-map triggers a ~30 s syspolicyd /
+ * XProtect scan. gktool(1) runs that scan now (Apple's documented pre-warm)
+ * so the first jail run pays no policy cost. Skip .atlas/.map: metadata,
+ * not exec-mapped.
+ */
+static void prewarm_gatekeeper(const char *rootfs) {
+    char cmd[4096];
+    snprintf(cmd, sizeof cmd,
+        "for f in '%s%s'/dyld_shared_cache_arm64e '%s%s'/dyld_shared_cache_arm64e.[0-9]* ; do "
+        "[ -f \"$f\" ] && gktool scan \"$f\" >/dev/null ; "
+        "done",
+        rootfs, CACHE_DIR, rootfs, CACHE_DIR);
+    if (system(cmd) != 0) die("gktool prewarm");
+}
+
 static int cmd_bootstrap(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: bootstrap <rootfs>\n");
@@ -668,6 +685,9 @@ static int cmd_bootstrap(int argc, char **argv) {
     /* copy shared cache -> all shared libs are here */
     snprintf(buf, sizeof buf, "cp -f %s/dyld_shared_cache_arm64e* %s%s", CACHE_DIR, rootfs, CACHE_DIR);
     if (system(buf) != 0) die("copy cache");
+
+    /* pre-warm GK so the first jail run does not pay the syspolicyd scan */
+    prewarm_gatekeeper(rootfs);
 
     /* install all binaries from DEFAULT_TOOLS */
     for (size_t i = 0; i < sizeof DEFAULT_TOOLS / sizeof DEFAULT_TOOLS[0]; i++) {
