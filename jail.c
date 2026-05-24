@@ -470,38 +470,6 @@ static void close_fds_from(int start_fd) {
     for (int fd = start_fd; fd < 1024; fd++) close(fd);
 }
 
-static int cmd_bootstrap(int argc, char **argv);
-static int cmd_run(int argc, char **argv);
-static int cmd_install(int argc, char **argv);
-static int cmd_shell(int argc, char **argv);
-
-int main(int argc, char **argv) {
-    if (argc < 2) {
-        fprintf(stderr, 
-            "usage: %s bootstrap <rootfs>\n"
-            "       %s run <rootfs> <binpath> [args...]\n"
-            "       %s install <rootfs> <host-path> <rootfs-path>\n"
-            "       %s shell <rootfs> <shellbin-path> [args...]\n",
-            argv[0], argv[0], argv[0], argv[0]);
-        return 2;
-    }
-
-    if (strcmp(argv[1], "bootstrap") == 0) {
-        return cmd_bootstrap(argc - 1, argv + 1);
-    }
-    if (strcmp(argv[1], "run") == 0) {
-        return cmd_run(argc - 1, argv + 1);
-    }
-    if (strcmp(argv[1], "shell") == 0) {
-        return cmd_shell(argc - 1, argv + 1);
-    }
-    if (strcmp(argv[1], "install") == 0) {
-        return cmd_install(argc - 1, argv + 1);
-    }
-    fprintf(stderr, "%s: unknow subcommand %s\n", argv[0], argv[1]);
-    return 2;
-}
-
 static int cmd_bootstrap(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: bootstrap <rootfs>\n");
@@ -735,3 +703,29 @@ static int cmd_shell(int argc, char **argv) {
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr,
+            "usage: %s bootstrap <rootfs>\n"
+            "       %s run <rootfs> <binpath> [args...]\n"
+            "       %s install <rootfs> <host-path> <rootfs-path>\n"
+            "       %s shell <rootfs> <shellbin-path> [args...]\n",
+            argv[0], argv[0], argv[0], argv[0]);
+        return 2;
+    }
+
+    if (strcmp(argv[1], "bootstrap") == 0) {
+        return cmd_bootstrap(argc - 1, argv + 1);
+    }
+    if (strcmp(argv[1], "run") == 0) {
+        return cmd_run(argc - 1, argv + 1);
+    }
+    if (strcmp(argv[1], "shell") == 0) {
+        return cmd_shell(argc - 1, argv + 1);
+    }
+    if (strcmp(argv[1], "install") == 0) {
+        return cmd_install(argc - 1, argv + 1);
+    }
+    fprintf(stderr, "%s: unknow subcommand %s\n", argv[0], argv[1]);
+    return 2;
+}
