@@ -663,9 +663,10 @@ static void drain_to_stdout(int master) {
     fcntl(master, F_SETFL, flags);
 }
 
-static void relay(int master, pid_t child) {
+static void relay(int master) {
     /* file descriptors set */
     fd_set rfds; char buf[4096];
+    int stdin_open = 1;
     /*
      * loop keeps forwarding bytes in both directions:
      * pty master -> host stdout
@@ -679,7 +680,8 @@ static void relay(int master, pid_t child) {
          * master -> readable when the shell wrote output to the pty
          * 0 (stdin) -> readable when the user typed input into the runner
          */
-        FD_SET(master, &rfds); FD_SET(0, &rfds);
+        FD_SET(master, &rfds);
+        if (stdin_open) FD_SET(0, &rfds);
 
         int maxfd = master > 0 ? master : 0;
         if (select(maxfd + 1, &rfds, NULL, NULL, NULL) < 0) {
@@ -688,25 +690,23 @@ static void relay(int master, pid_t child) {
 
         if (FD_ISSET(master, &rfds)) {
             ssize_t n = read(master, buf, sizeof buf);
-            if (n <= 0) return; /* child closed pty */
+            if (n <= 0) {
+                drain_to_stdout(master);
+                return;
+            }
             write(1, buf, n);
         }
-        if (FD_ISSET(0 ,&rfds)) {
+        if (stdin_open && FD_ISSET(0 ,&rfds)) {
             ssize_t n = read(0, buf, sizeof buf);
-            /* user closed stdin -> send EOF to child */
+            /* user closed stdin -> send pty EOF and keep draining output */
             if (n <= 0) {
-                close(master);
-                return;
+                char eof = 4;
+                write(master, &eof, 1);
+                stdin_open = 0;
+                continue;
             }
             write(master, buf, n);
         }
-    }
-    /* when child dies drain master and exit */
-    int status;
-    pid_t r = waitpid(child, &status, WNOHANG);
-    if (r == child) {
-        drain_to_stdout(master);
-        return;
     }
 }
 
@@ -737,7 +737,7 @@ static int cmd_shell(int argc, char **argv) {
     enter_raw_mode();
     atexit(leave_raw_mode);
     /* start master - replica pty relay loop */
-    relay(master, pid);
+    relay(master);
     int status; waitpid(pid, &status, 0) ;
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
