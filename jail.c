@@ -143,17 +143,21 @@ static int patch_arm64e_abi_v1(const char *path) {
     static const size_t FAT_ARCH_OFFSET_OFF       = 8;
     static const size_t FAT_ARCH_64_OFFSET_LO_OFF = 12;
 
-    int fd = open(path, O_RDWR);
+    int fd = -1;
+    unsigned char *data = MAP_FAILED;
+    size_t size = 0;
+    int patched = 0;
+
+    fd = open(path, O_RDWR);
     if (fd < 0) {
         fprintf(stderr, "patch: open %s: %s\n", path, strerror(errno));
-        return -1;
+        goto fail;
     }
 
     struct stat st;
     if (fstat(fd, &st) < 0) {
         fprintf(stderr, "patch: fstat %s: %s\n", path, strerror(errno));
-        close(fd);
-        return -1;
+        goto fail;
     }
 
     /* min mach_header_64 size */
@@ -162,24 +166,17 @@ static int patch_arm64e_abi_v1(const char *path) {
         return 0;
     }
 
+    size = (size_t)st.st_size;
+
     /**
      * map in memory with read and write enabled
      * MAP_SHARED -> map the changes to the file too
      */
-    unsigned char *data = mmap(
-                        NULL, (size_t)st.st_size,
-                        PROT_READ | PROT_WRITE,
-                        MAP_SHARED, fd, 0
-                    );
+    data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (data == MAP_FAILED) {
         fprintf(stderr, "patch: mmap %s: %s\n", path, strerror(errno));
-        close(fd);
-        return -1; 
+        goto fail;
     }
-
-    /* store file size and track modifications */
-    size_t size = (size_t)st.st_size;
-    int patched = 0;
 
     uint32_t magic_le = read_le32(data);
     uint32_t magic_be = read_be32(data);
@@ -190,11 +187,7 @@ static int patch_arm64e_abi_v1(const char *path) {
     } else if (magic_be == FAT_MAGIC || magic_be == FAT_MAGIC_64) {
         /* if universal binary (fat Mach-O) */
 
-        if (size < FAT_HEADER_SIZE) {
-            munmap(data, size);
-            close(fd);
-            return -1;
-        }
+        if (size < FAT_HEADER_SIZE) goto fail;
 
         /*
          * nfat -> number of arch slices.
@@ -208,9 +201,7 @@ static int patch_arm64e_abi_v1(const char *path) {
         /* check the file size is AT LEAST as big as the table */
         if (FAT_HEADER_SIZE + ((size_t)nfat * arch_table_size) > size) {
             fprintf(stderr, "patch: malformed fat header: %s\n", path);
-            munmap(data, size);
-            close(fd);
-            return -1;
+            goto fail;
         }
 
         for (uint32_t i = 0; i < nfat; i++) {
@@ -242,9 +233,7 @@ static int patch_arm64e_abi_v1(const char *path) {
             /* verify there is AT LEAST the embedded Mach-O header at offset */
             if (offset + MACH_HEADER_64_SIZE > size) {
                 fprintf(stderr, "patch: bad Mach-O slice offset: %s\n", path);
-                munmap(data, size);
-                close(fd);
-                return -1;
+                goto fail;
             }
 
             if (cpusubtype == CPU_SUBTYPE_ARM64E_V0) {
@@ -265,15 +254,18 @@ static int patch_arm64e_abi_v1(const char *path) {
     if (patched) {
         if (msync(data, size, MS_SYNC | MS_INVALIDATE) < 0) {
             fprintf(stderr, "patch: msync %s: %s\n", path, strerror(errno));
-            munmap(data, size);
-            close(fd);
-            return -1;
+            goto fail;
         }
     }
 
     munmap(data, size);
     close(fd);
     return patched;
+
+fail:
+    if (data != MAP_FAILED) munmap(data, size);
+    if (fd >= 0) close(fd);
+    return -1;
 }
 
 /*
@@ -379,43 +371,42 @@ static int hide_cms_slot_in_slice(unsigned char *slice, size_t slice_size) {
 }
 
 static int hide_cms_slot(const char *path) {
-    int fd = open(path, O_RDWR);
+    int fd = -1;
+    unsigned char *data = MAP_FAILED;
+    size_t size = 0;
+    int patched = 0;
+
+    fd = open(path, O_RDWR);
     if (fd < 0) {
         fprintf(stderr, "hide_cms: open %s: %s\n", path, strerror(errno));
-        return -1;
+        goto fail;
     }
 
     struct stat st;
     if (fstat(fd, &st) < 0) {
         fprintf(stderr, "hide_cms: fstat %s: %s\n", path, strerror(errno));
-        close(fd);
-        return -1;
+        goto fail;
     }
     if (st.st_size < 32) { close(fd); return 0; }
 
-    unsigned char *data = mmap(NULL, (size_t)st.st_size,
-                               PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    size = (size_t)st.st_size;
+    data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (data == MAP_FAILED) {
         fprintf(stderr, "hide_cms: mmap %s: %s\n", path, strerror(errno));
-        close(fd);
-        return -1;
+        goto fail;
     }
 
-    size_t size = (size_t)st.st_size;
-    int patched = 0;
     uint32_t magic_le = read_le32(data);
     uint32_t magic_be = read_be32(data);
 
     if (magic_le == MH_MAGIC_64) {
         int r = hide_cms_slot_in_slice(data, size);
-        if (r < 0) { munmap(data, size); close(fd); return -1; }
+        if (r < 0) goto fail;
         patched |= r;
     } else if (magic_be == FAT_MAGIC || magic_be == FAT_MAGIC_64) {
         uint32_t nfat = read_be32(data + 4);
         size_t arch_table_size = (magic_be == FAT_MAGIC) ? 20 : 32;
-        if (8 + ((size_t)nfat * arch_table_size) > size) {
-            munmap(data, size); close(fd); return -1;
-        }
+        if (8 + ((size_t)nfat * arch_table_size) > size) goto fail;
         for (uint32_t i = 0; i < nfat; i++) {
             unsigned char *at = data + 8 + ((size_t)i * arch_table_size);
             uint64_t offset, slice_size;
@@ -426,11 +417,9 @@ static int hide_cms_slot(const char *path) {
                 offset = ((uint64_t)read_be32(at + 8) << 32) | read_be32(at + 12);
                 slice_size = ((uint64_t)read_be32(at + 16) << 32) | read_be32(at + 20);
             }
-            if (offset + slice_size > size) {
-                munmap(data, size); close(fd); return -1;
-            }
+            if (offset + slice_size > size) goto fail;
             int r = hide_cms_slot_in_slice(data + offset, (size_t)slice_size);
-            if (r < 0) { munmap(data, size); close(fd); return -1; }
+            if (r < 0) goto fail;
             patched |= r;
         }
     }
@@ -438,12 +427,17 @@ static int hide_cms_slot(const char *path) {
     if (patched) {
         if (msync(data, size, MS_SYNC | MS_INVALIDATE) < 0) {
             fprintf(stderr, "hide_cms: msync %s: %s\n", path, strerror(errno));
-            munmap(data, size); close(fd); return -1;
+            goto fail;
         }
     }
     munmap(data, size);
     close(fd);
     return patched;
+
+fail:
+    if (data != MAP_FAILED) munmap(data, size);
+    if (fd >= 0) close(fd);
+    return -1;
 }
 
 static void die(const char *what) {
