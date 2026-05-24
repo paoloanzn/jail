@@ -87,7 +87,67 @@ static const char *DEFAULT_TOOLS[] = {
     "/bin/test",
     "/bin/unlink",
     "/bin/wait4path",
-    "/bin/zsh"
+    "/bin/zsh",
+    "/usr/bin/env",
+    "/usr/bin/printf",
+    "/usr/bin/true",
+    "/usr/bin/false",
+    "/usr/bin/yes",
+    "/usr/bin/id",
+    "/usr/bin/whoami",
+    "/usr/bin/uname",
+    "/usr/bin/groups",
+    "/usr/bin/tty",
+    "/usr/bin/awk",
+    "/usr/bin/sed",
+    "/usr/bin/grep",
+    "/usr/bin/egrep",
+    "/usr/bin/fgrep",
+    "/usr/bin/head",
+    "/usr/bin/tail",
+    "/usr/bin/cut",
+    "/usr/bin/tr",
+    "/usr/bin/wc",
+    "/usr/bin/sort",
+    "/usr/bin/uniq",
+    "/usr/bin/tee",
+    "/usr/bin/xargs",
+    "/usr/bin/paste",
+    "/usr/bin/comm",
+    "/usr/bin/find",
+    "/usr/bin/touch",
+    "/usr/bin/mktemp",
+    "/usr/bin/stat",
+    "/usr/bin/du",
+    "/usr/bin/basename",
+    "/usr/bin/dirname",
+    "/usr/bin/diff",
+    "/usr/bin/diff3",
+    "/usr/bin/cmp",
+    "/usr/bin/patch",
+    "/usr/bin/time",
+    "/usr/bin/nice",
+    "/usr/bin/nohup",
+    "/usr/bin/seq",
+    "/usr/bin/jot",
+    "/usr/bin/split",
+    "/usr/bin/join",
+    "/usr/bin/fold",
+    "/usr/bin/expand",
+    "/usr/bin/unexpand",
+    "/usr/bin/hexdump",
+    "/usr/bin/xxd",
+    "/usr/bin/od",
+    "/usr/bin/cksum",
+    "/usr/bin/sum",
+    "/usr/bin/bsdtar",
+    "/usr/bin/tar",
+    "/usr/bin/gzip",
+    "/usr/bin/gunzip",
+    "/usr/bin/bzip2",
+    "/usr/bin/bunzip2",
+    "/usr/bin/zip",
+    "/usr/bin/unzip"
 };
 
 static struct termios saved_tios;
@@ -729,6 +789,8 @@ static int cmd_bootstrap(int argc, char **argv) {
     char buf[4096];
     snprintf(buf, sizeof buf, "%s/usr/lib", rootfs); mkdir_p(buf);
     snprintf(buf, sizeof buf, "%s/bin", rootfs); mkdir_p(buf);
+    snprintf(buf, sizeof buf, "%s/tmp", rootfs); mkdir_p(buf);
+    if (chmod(buf, 01777) < 0) die("chmod tmp");
     snprintf(buf, sizeof buf, "%s%s", rootfs, CACHE_DIR); mkdir_p(buf);
     snprintf(buf, sizeof buf, "%s%s", rootfs, DYLD_PATH); copyfile(DYLD_PATH, buf);
 
