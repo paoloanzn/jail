@@ -50,6 +50,102 @@
 #define CSSLOT_SIGNATURESLOT         0x10000
 #define CSSLOT_HIDDEN_CMS            0xfffe   /* unused slot type */
 
+static const char *DEFAULT_TOOLS[] = {
+    "/bin/[",
+    "/bin/bash",
+    "/bin/cat",
+    "/bin/chmod",
+    "/bin/cp",
+    "/bin/csh",
+    "/bin/dash",
+    "/bin/date",
+    "/bin/dd",
+    "/bin/df",
+    "/bin/echo",
+    "/bin/ed",
+    "/bin/expr",
+    "/bin/hostname",
+    "/bin/kill",
+    "/bin/ksh",
+    "/bin/launchctl",
+    "/bin/link",
+    "/bin/ln",
+    "/bin/ls",
+    "/bin/mkdir",
+    "/bin/mv",
+    "/bin/pax",
+    "/bin/ps",
+    "/bin/pwd",
+    "/bin/realpath",
+    "/bin/rm",
+    "/bin/rmdir",
+    "/bin/sh",
+    "/bin/sleep",
+    "/bin/stty",
+    "/bin/sync",
+    "/bin/tcsh",
+    "/bin/test",
+    "/bin/unlink",
+    "/bin/wait4path",
+    "/bin/zsh"
+};
+
+static struct termios saved_tios;
+static int saved_tios_valid = 0;
+static int g_master_fd = -1;
+
+/* standard utilities */
+
+static void die(const char *what) {
+    fprintf(stderr, "jail: %s: %s\n", what, strerror(errno));
+    exit(1);
+}
+
+static void close_fds_from(int start_fd) {
+    for (int fd = start_fd; fd < 1024; fd++) close(fd);
+}
+
+static int parse_id_env(const char *name, unsigned long *id) {
+    const char *value = getenv(name);
+    char *end = NULL;
+
+    if (value == NULL || *value == 0) return 0;
+
+    errno = 0;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (errno != 0 || end == value || *end != 0) return 0;
+
+    *id = parsed;
+    return 1;
+}
+
+static void drop_privileges(void) {
+    uid_t uid = getuid();
+    gid_t gid = getgid();
+    unsigned long parsed;
+
+    /* sudo sets real uid/gid to root, so use its original-caller metadata. */
+    if (parse_id_env("SUDO_UID", &parsed)) uid = (uid_t)parsed;
+    if (parse_id_env("SUDO_GID", &parsed)) gid = (gid_t)parsed;
+
+    if (setgroups(1, &gid) < 0) die("setgroups");
+    if (setgid(gid) < 0) die("setgid");
+    if (setuid(uid) < 0) die("setuid");
+}
+
+static void mkdir_p(const char *path) {
+    char cmd[4096];
+    snprintf(cmd, sizeof cmd, "mkdir -p '%s'", path);
+    if(system(cmd) != 0) die("mkdir_p");
+}
+
+/* TODO (AGENT): replace with stdlib copyfile() -> #include <copyfile.h> */
+static void copyfile(const char *src, const char *dst) {
+    char cmd[4096];
+    snprintf(cmd, sizeof cmd, "cp -f '%s' '%s'", src, dst);
+    if(system(cmd) != 0) die("copy");
+}
+
 /*
  *  arm64 only binaries -> Mach-O Thin -> little endian byte order
  *  universal binaries (arm64 + x86) -> Mach-O Fat -> big endian byte order
@@ -287,6 +383,15 @@ fail:
     return -1;
 }
 
+static void resign_adhoc(const char *path) {
+    char cmd[4096];
+    snprintf(cmd, sizeof cmd, "codesign --remove-signature '%s' 2>/dev/null || true", path);
+    if(system(cmd) != 0) die("codesign remove-signature");
+
+    snprintf(cmd, sizeof cmd, "codesign --force --sign - '%s'", path);
+    if(system(cmd) != 0) die("codesign sign adhoc");
+}
+
 /*
  * After `codesign --force --sign -`, the embedded signature still contains an
  * empty CMS blob wrapper (CSSLOT_SIGNATURESLOT, magic 0xfade0b01, length 8).
@@ -459,183 +564,6 @@ fail:
     return -1;
 }
 
-/* standard utilities */
-
-static void die(const char *what) {
-    fprintf(stderr, "jail: %s: %s\n", what, strerror(errno));
-    exit(1);
-}
-
-/* TODO (AGENT): replace with stdlib copyfile() -> #include <copyfile.h> */
-static void copyfile(const char *src, const char *dst) {
-    char cmd[4096];
-    snprintf(cmd, sizeof cmd, "cp -f '%s' '%s'", src, dst);
-    if(system(cmd) != 0) die("copy");
-}
-
-static void mkdir_p(const char *path) {
-    char cmd[4096];
-    snprintf(cmd, sizeof cmd, "mkdir -p '%s'", path);
-    if(system(cmd) != 0) die("mkdir_p");
-}
-
-static void resign_adhoc(const char *path) {
-    char cmd[4096];
-    snprintf(cmd, sizeof cmd, "codesign --remove-signature '%s' 2>/dev/null || true", path);
-    if(system(cmd) != 0) die("codesign remove-signature");
-
-    snprintf(cmd, sizeof cmd, "codesign --force --sign - '%s'", path);
-    if(system(cmd) != 0) die("codesign sign adhoc");
-}
-
-static void close_fds_from(int start_fd) {
-    for (int fd = start_fd; fd < 1024; fd++) close(fd);
-}
-
-static int parse_id_env(const char *name, unsigned long *id) {
-    const char *value = getenv(name);
-    char *end = NULL;
-
-    if (value == NULL || *value == 0) return 0;
-
-    errno = 0;
-    unsigned long parsed = strtoul(value, &end, 10);
-    if (errno != 0 || end == value || *end != 0) return 0;
-
-    *id = parsed;
-    return 1;
-}
-
-static void drop_privileges(void) {
-    uid_t uid = getuid();
-    gid_t gid = getgid();
-    unsigned long parsed;
-
-    /* sudo sets real uid/gid to root, so use its original-caller metadata. */
-    if (parse_id_env("SUDO_UID", &parsed)) uid = (uid_t)parsed;
-    if (parse_id_env("SUDO_GID", &parsed)) gid = (gid_t)parsed;
-
-    if (setgroups(1, &gid) < 0) die("setgroups");
-    if (setgid(gid) < 0) die("setgid");
-    if (setuid(uid) < 0) die("setuid");
-}
-
-static int cmd_run(int argc, char **argv) {
-    if (argc < 3) {
-        fprintf(stderr, "usage: run <rootfs> <binary_path> [args...]\n");
-        return 2;
-    }
-
-    char buf[4096];
-
-    const char *rootfs = argv[1];
-    const char *binpath = argv[2];
-
-    int out_pipe[2];
-    if (pipe(out_pipe) < 0) die("pipe");
-
-    /* fork, chroot in the child, exec binary */
-    pid_t pid = fork();
-    if (pid < 0) die("fork");
-
-    if (pid == 0) {
-        /* redirect stdout and stderr to pipe write end */
-        if (dup2(out_pipe[1], 1) < 0) die("dup2 stdout");
-        if (dup2(out_pipe[1], 2) < 0) die("dup2 stderr");
-        /* close original parent's fd to pipe ends*/
-        close(out_pipe[0]); close(out_pipe[1]);
-
-        /* close all other inherithed fds */
-        close_fds_from(3);
-
-        if (chdir(rootfs) < 0) die("chdir");
-        if (chroot(".") < 0) die("chroot");
-        if (chdir("/") < 0) die("chdir post-chroot");
-
-        drop_privileges();
-
-        /*
-         * dyld inside the chroot:
-         *   <binary> -> /usr/lib/dyld -> libSystem -> dyld shared cache
-         *
-         * The cache files were copied into the rootfs, but not with full system
-         * metadata. In particular, cp -p cannot preserve Apple's SIP/rootless flags
-         * here: it eventually needs chflags(SF_RESTRICTED) on the copied files, and
-         * XNU blocks that for normal userland, even as root.
-         *
-         * Normal dyld cache mapping:
-         *   copied cache -> XNU shared-region mapping
-         *                -> XNU expects a trusted/SIP-protected cache vnode
-         *                -> copied cache is not equivalent to the real Apple vnode
-         *                -> "syscall to map cache into shared region failed"
-         *
-         * Workaround:
-         *   DYLD_SHARED_CACHE_DIR
-         *     -> tell dyld where the copied cache lives inside the chroot
-         *
-         *   DYLD_SHARED_REGION=private
-         *     -> avoid the global shared-region path
-         *     -> privately mmap this process's copy of the cache instead
-         */
-        char *cenvp[] = { DYLD_SHARED_CACHE_DIR_ENV, DYLD_SHARED_REGION_ENV, NULL };
-
-        execve(binpath, argv + 2, cenvp);
-        die("execve");
-    }
-
-    close(out_pipe[1]);
-    /* read child stdout and stderr from pipe */
-    ssize_t n;
-    while ((n = read(out_pipe[0], buf, sizeof buf)) > 0) {
-        write(1, buf, n);
-    }
-    close(out_pipe[0]);
-
-    int status;
-    if (waitpid(pid, &status, 0) < 0) die("waitpid");
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
-}
-
-static const char *DEFAULT_TOOLS[] = {
-    "/bin/[",
-    "/bin/bash",
-    "/bin/cat",
-    "/bin/chmod",
-    "/bin/cp",
-    "/bin/csh",
-    "/bin/dash",
-    "/bin/date",
-    "/bin/dd",
-    "/bin/df",
-    "/bin/echo",
-    "/bin/ed",
-    "/bin/expr",
-    "/bin/hostname",
-    "/bin/kill",
-    "/bin/ksh",
-    "/bin/launchctl",
-    "/bin/link",
-    "/bin/ln",
-    "/bin/ls",
-    "/bin/mkdir",
-    "/bin/mv",
-    "/bin/pax",
-    "/bin/ps",
-    "/bin/pwd",
-    "/bin/realpath",
-    "/bin/rm",
-    "/bin/rmdir",
-    "/bin/sh",
-    "/bin/sleep",
-    "/bin/stty",
-    "/bin/sync",
-    "/bin/tcsh",
-    "/bin/test",
-    "/bin/unlink",
-    "/bin/wait4path",
-    "/bin/zsh"
-};
-
 static void install_binary(const char *rootfs, const char *host, const char *inside) {
     char dst[4096]; char parent[4096];
     snprintf(dst, sizeof dst, "%s%s", rootfs, inside);
@@ -671,16 +599,6 @@ static void install_binary(const char *rootfs, const char *host, const char *ins
     if (chmod(dst, 0755) < 0) die("chmod");
 }
 
-static int cmd_install(int argc, char **argv) {
-    if (argc != 4) {
-        fprintf(stderr, "usage: install <rootfs> <host-path> <rootfs-path>\n");
-        return 2;
-    }
-
-    install_binary(argv[1], argv[2], argv[3]);
-    return 0;
-}
-
 /*
  * The cp'd cache slices are new vnodes with com.apple.provenance and no
  * trustcache entry, so the first exec-map triggers a ~30 s syspolicyd /
@@ -697,41 +615,6 @@ static void prewarm_gatekeeper(const char *rootfs) {
         rootfs, CACHE_DIR, rootfs, CACHE_DIR);
     if (system(cmd) != 0) die("gktool prewarm");
 }
-
-static int cmd_bootstrap(int argc, char **argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: bootstrap <rootfs>\n");
-        return 2;
-    }
-
-    const char *rootfs = argv[1];
-
-    /* build minimal rootfs folder structure */
-    char buf[4096];
-    snprintf(buf, sizeof buf, "%s/usr/lib", rootfs); mkdir_p(buf);
-    snprintf(buf, sizeof buf, "%s/bin", rootfs); mkdir_p(buf);
-    snprintf(buf, sizeof buf, "%s%s", rootfs, CACHE_DIR); mkdir_p(buf);
-    snprintf(buf, sizeof buf, "%s%s", rootfs, DYLD_PATH); copyfile(DYLD_PATH, buf);
-
-    /* copy shared cache -> all shared libs are here */
-    snprintf(buf, sizeof buf, "cp -f %s/dyld_shared_cache_arm64e* %s%s", CACHE_DIR, rootfs, CACHE_DIR);
-    if (system(buf) != 0) die("copy cache");
-
-    /* pre-warm GK so the first jail run does not pay the syspolicyd scan */
-    prewarm_gatekeeper(rootfs);
-
-    /* install all binaries from DEFAULT_TOOLS */
-    for (size_t i = 0; i < sizeof DEFAULT_TOOLS / sizeof DEFAULT_TOOLS[0]; i++) {
-        /* mirror the same host path inside rootfs */
-        install_binary(rootfs, DEFAULT_TOOLS[i],
-                        DEFAULT_TOOLS[i]);
-    }
-    return 0;
-}
-
-static struct termios saved_tios;
-static int saved_tios_valid = 0;
-static int g_master_fd = -1;
 
 static void enter_raw_mode(void) {
     if (!isatty(0)) return;
@@ -834,6 +717,123 @@ static void relay(int master) {
     }
 }
 
+static int cmd_bootstrap(int argc, char **argv) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: bootstrap <rootfs>\n");
+        return 2;
+    }
+
+    const char *rootfs = argv[1];
+
+    /* build minimal rootfs folder structure */
+    char buf[4096];
+    snprintf(buf, sizeof buf, "%s/usr/lib", rootfs); mkdir_p(buf);
+    snprintf(buf, sizeof buf, "%s/bin", rootfs); mkdir_p(buf);
+    snprintf(buf, sizeof buf, "%s%s", rootfs, CACHE_DIR); mkdir_p(buf);
+    snprintf(buf, sizeof buf, "%s%s", rootfs, DYLD_PATH); copyfile(DYLD_PATH, buf);
+
+    /* copy shared cache -> all shared libs are here */
+    snprintf(buf, sizeof buf, "cp -f %s/dyld_shared_cache_arm64e* %s%s", CACHE_DIR, rootfs, CACHE_DIR);
+    if (system(buf) != 0) die("copy cache");
+
+    /* pre-warm GK so the first jail run does not pay the syspolicyd scan */
+    prewarm_gatekeeper(rootfs);
+
+    /* install all binaries from DEFAULT_TOOLS */
+    for (size_t i = 0; i < sizeof DEFAULT_TOOLS / sizeof DEFAULT_TOOLS[0]; i++) {
+        /* mirror the same host path inside rootfs */
+        install_binary(rootfs, DEFAULT_TOOLS[i],
+                        DEFAULT_TOOLS[i]);
+    }
+    return 0;
+}
+
+static int cmd_install(int argc, char **argv) {
+    if (argc != 4) {
+        fprintf(stderr, "usage: install <rootfs> <host-path> <rootfs-path>\n");
+        return 2;
+    }
+
+    install_binary(argv[1], argv[2], argv[3]);
+    return 0;
+}
+
+static int cmd_run(int argc, char **argv) {
+    if (argc < 3) {
+        fprintf(stderr, "usage: run <rootfs> <binary_path> [args...]\n");
+        return 2;
+    }
+
+    char buf[4096];
+
+    const char *rootfs = argv[1];
+    const char *binpath = argv[2];
+
+    int out_pipe[2];
+    if (pipe(out_pipe) < 0) die("pipe");
+
+    /* fork, chroot in the child, exec binary */
+    pid_t pid = fork();
+    if (pid < 0) die("fork");
+
+    if (pid == 0) {
+        /* redirect stdout and stderr to pipe write end */
+        if (dup2(out_pipe[1], 1) < 0) die("dup2 stdout");
+        if (dup2(out_pipe[1], 2) < 0) die("dup2 stderr");
+        /* close original parent's fd to pipe ends*/
+        close(out_pipe[0]); close(out_pipe[1]);
+
+        /* close all other inherithed fds */
+        close_fds_from(3);
+
+        if (chdir(rootfs) < 0) die("chdir");
+        if (chroot(".") < 0) die("chroot");
+        if (chdir("/") < 0) die("chdir post-chroot");
+
+        drop_privileges();
+
+        /*
+         * dyld inside the chroot:
+         *   <binary> -> /usr/lib/dyld -> libSystem -> dyld shared cache
+         *
+         * The cache files were copied into the rootfs, but not with full system
+         * metadata. In particular, cp -p cannot preserve Apple's SIP/rootless flags
+         * here: it eventually needs chflags(SF_RESTRICTED) on the copied files, and
+         * XNU blocks that for normal userland, even as root.
+         *
+         * Normal dyld cache mapping:
+         *   copied cache -> XNU shared-region mapping
+         *                -> XNU expects a trusted/SIP-protected cache vnode
+         *                -> copied cache is not equivalent to the real Apple vnode
+         *                -> "syscall to map cache into shared region failed"
+         *
+         * Workaround:
+         *   DYLD_SHARED_CACHE_DIR
+         *     -> tell dyld where the copied cache lives inside the chroot
+         *
+         *   DYLD_SHARED_REGION=private
+         *     -> avoid the global shared-region path
+         *     -> privately mmap this process's copy of the cache instead
+         */
+        char *cenvp[] = { DYLD_SHARED_CACHE_DIR_ENV, DYLD_SHARED_REGION_ENV, NULL };
+
+        execve(binpath, argv + 2, cenvp);
+        die("execve");
+    }
+
+    close(out_pipe[1]);
+    /* read child stdout and stderr from pipe */
+    ssize_t n;
+    while ((n = read(out_pipe[0], buf, sizeof buf)) > 0) {
+        write(1, buf, n);
+    }
+    close(out_pipe[0]);
+
+    int status;
+    if (waitpid(pid, &status, 0) < 0) die("waitpid");
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
 static int cmd_shell(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: shell <rootfs> <shellbin-path>\n");
@@ -876,8 +876,8 @@ int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr,
             "usage: %s bootstrap <rootfs>\n"
-            "       %s run <rootfs> <binpath> [args...]\n"
             "       %s install <rootfs> <host-path> <rootfs-path>\n"
+            "       %s run <rootfs> <binpath> [args...]\n"
             "       %s shell <rootfs> <shellbin-path> [args...]\n",
             argv[0], argv[0], argv[0], argv[0]);
         return 2;
@@ -886,14 +886,14 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "bootstrap") == 0) {
         return cmd_bootstrap(argc - 1, argv + 1);
     }
+    if (strcmp(argv[1], "install") == 0) {
+        return cmd_install(argc - 1, argv + 1);
+    }
     if (strcmp(argv[1], "run") == 0) {
         return cmd_run(argc - 1, argv + 1);
     }
     if (strcmp(argv[1], "shell") == 0) {
         return cmd_shell(argc - 1, argv + 1);
-    }
-    if (strcmp(argv[1], "install") == 0) {
-        return cmd_install(argc - 1, argv + 1);
     }
     fprintf(stderr, "%s: unknow subcommand %s\n", argv[0], argv[1]);
     return 2;
