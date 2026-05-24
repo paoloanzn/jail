@@ -35,7 +35,7 @@ Guidance for AI coding agents working in this repository. See
 - Run full test suite: `sudo sh tests/run.sh`
 - Run one test file: `sudo sh tests/run.sh tests/006-system-binary.sh`
 - Keep failing test workdir for inspection: `JAIL_TEST_KEEP=1 sudo sh tests/run.sh`
-- Find agent TODOs when asked: `rg -F '# TODO (AGENT)'`
+- Find agent TODOs when asked: `rg -F 'TODO (AGENT)'`
 
 Usage commands:
 
