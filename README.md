@@ -12,15 +12,14 @@ git clone https://github.com/paoloanzn/jail.git
 sudo make install # /usr/local/bin
 ```
 
-2. Bootstrap a minimal fsroot
+2. Bootstrap a minimal rootfs
 ```zsh
 sudo jail bootstrap ./rootfs
 ```
 
-3. Install a bash shell and run it
+3. Run a bash shell inside it
 ```zsh
-sudo jail install ./rootfs /bin/bash /bin/bash # <host-binary-path> <rootfs-relative-binary-path>
-sudo jail shell ./roofs /bin/bash
+sudo jail shell ./rootfs /bin/bash
 ```
 
 ```bash
